@@ -25,6 +25,7 @@ import {
 } from "./vendor/vscode/editor/common/diff/linesDiffComputer";
 import { match } from "arktype";
 import { getActiveTextEditorDiff, pathEquals } from "./utils";
+import { registerDescriptionEditor } from "./descriptionEditor";
 
 export async function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel("Jujutsu Kaizen", {
@@ -55,6 +56,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const workspaceSCM = new WorkspaceSourceControlManager(decorationProvider);
   await workspaceSCM.refresh();
   context.subscriptions.push(workspaceSCM);
+  const descriptionEditor = registerDescriptionEditor({ context, workspaceSCM });
 
   let checkReposFunction: (specificFolders?: string[]) => Promise<void>;
 
@@ -750,24 +752,12 @@ export async function activate(context: vscode.ExtensionContext) {
           }
 
           const showResult = await repository.show(resourceGroup.id);
-
-          const message = await vscode.window.showInputBox({
-            prompt: "Provide a description",
-            placeHolder: "Change description here...",
-            value: showResult.change.description,
+          await descriptionEditor.openDescriptionEditor({
+            repositoryRoot: repository.repositoryRoot,
+            rev: resourceGroup.id,
+            initialDescription: showResult.change.description,
+            changeId: showResult.change.changeId,
           });
-
-          if (message === undefined) {
-            return;
-          }
-
-          try {
-            await repository.describeRetryImmutable(resourceGroup.id, message);
-          } catch (error) {
-            vscode.window.showErrorMessage(
-              `Failed to update description${error instanceof Error ? `: ${error.message}` : ""}`,
-            );
-          }
         },
       ),
     );

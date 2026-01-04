@@ -18,9 +18,11 @@ async function main() {
     const testRepoPath = await fs.mkdtemp(path.join(os.tmpdir(), "jjk-test-"));
 
     console.log(`Creating test repo in ${testRepoPath}`);
-    await execJJPromise("init --git", {
-      cwd: testRepoPath,
-    });
+    try {
+      await execJJPromise("git init", { cwd: testRepoPath });
+    } catch {
+      await execJJPromise("init --git", { cwd: testRepoPath });
+    }
 
     // Download VS Code, unzip it and run the integration test
     await runTests({

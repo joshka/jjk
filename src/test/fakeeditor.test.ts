@@ -24,6 +24,12 @@ function isExecException(e: unknown): e is ExecException {
 suite("fakeeditor", () => {
   initExtensionDir(vscode.extensions.getExtension("jjk.jjk")!.extensionUri);
 
+  suiteSetup(function () {
+    if (!fs.existsSync(fakeEditorPath)) {
+      this.skip();
+    }
+  });
+
   test("fails when JJ_FAKEEDITOR_SIGNAL_DIR is missing", async () => {
     await assert.rejects(
       async () => execPromise(fakeEditorPath, { timeout: 6000 }),
