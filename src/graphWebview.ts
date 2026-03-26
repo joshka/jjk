@@ -5,12 +5,13 @@ import path from "path";
 
 type Message = {
   command: string;
-  changeId: string;
-  selectedNodes: string[];
+  changeId?: string;
+  selectedNodes?: string[];
 };
 
 export class ChangeNode {
   description: string;
+  fullDescription: string;
   tooltip: string;
   contextValue: string;
   parentChangeIds?: string[];
@@ -28,6 +29,7 @@ export class ChangeNode {
   symbolColumn: number;
   constructor(
     description: string,
+    fullDescription: string,
     tooltip: string,
     contextValue: string,
     changeId: string,
@@ -45,6 +47,7 @@ export class ChangeNode {
     branchType?: string,
   ) {
     this.description = description;
+    this.fullDescription = fullDescription;
     this.tooltip = tooltip;
     this.contextValue = contextValue;
     this.changeId = changeId;
@@ -116,6 +119,9 @@ export class JJGraphWebview implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message: Message) => {
       switch (message.command) {
         case "editChange":
+          if (!message.changeId) {
+            break;
+          }
           try {
             await this.repository.editRetryImmutable(message.changeId);
           } catch (error: unknown) {
@@ -125,12 +131,32 @@ export class JJGraphWebview implements vscode.WebviewViewProvider {
           }
           break;
         case "selectChange":
-          this.selectedNodes = new Set(message.selectedNodes);
+          this.selectedNodes = new Set(message.selectedNodes ?? []);
           vscode.commands.executeCommand(
             "setContext",
             "jjGraphView.nodesSelected",
-            message.selectedNodes.length,
+            message.selectedNodes?.length ?? 0,
           );
+          break;
+        case "requestChangeDetails":
+          if (!message.changeId) {
+            break;
+          }
+          try {
+            const showResult = await this.repository.show(message.changeId);
+            this.panel?.webview.postMessage({
+              command: "changeDetails",
+              changeId: message.changeId,
+              fullDescription:
+                showResult.change.description || "(no description set)",
+            });
+          } catch {
+            this.panel?.webview.postMessage({
+              command: "changeDetails",
+              changeId: message.changeId,
+              fullDescription: undefined,
+            });
+          }
           break;
       }
     });
@@ -278,6 +304,7 @@ export class JJGraphWebview implements vscode.WebviewViewProvider {
       return (
         nodeA.tooltip === nodeB.tooltip &&
         nodeA.description === nodeB.description &&
+        nodeA.fullDescription === nodeB.fullDescription &&
         nodeA.contextValue === nodeB.contextValue &&
         nodeA.changeId === nodeB.changeId &&
         nodeA.commitId === nodeB.commitId &&
@@ -310,6 +337,24 @@ export function parseJJLog(output: string): ChangeNode[] {
   const stripGraphPrefix = (line: string) =>
     line.replace(/^[^a-zA-Z0-9(~]+/, "").trim();
 
+  const isGraphContinuationLine = (line: string) =>
+    /^[^a-zA-Z0-9~]*[│├╯╰╮╭─ ]/.test(line) || /^[^a-zA-Z0-9~]*$/.test(line);
+
+  const isEntryStartLine = (line: string) => {
+    const trimmedLine = line.trimEnd();
+    if (!trimmedLine) {
+      return false;
+    }
+
+    const strippedLine = stripGraphPrefix(trimmedLine);
+    return (
+      rootPattern.test(trimmedLine) ||
+      strippedLine === "~" ||
+      strippedLine === "~  (elided revisions)" ||
+      timestampPattern.test(trimmedLine)
+    );
+  };
+
   const getSymbolColumn = (line: string, branchType?: string) =>
     branchType ? Math.max(0, line.indexOf(branchType)) : 0;
 
@@ -332,6 +377,7 @@ export function parseJJLog(output: string): ChangeNode[] {
       changeNodes.push(
         new ChangeNode(
           "Older revisions hidden",
+          "Older revisions hidden",
           "Older revisions are hidden by the current jj log limit.",
           "",
           "",
@@ -352,24 +398,36 @@ export function parseJJLog(output: string): ChangeNode[] {
       continue;
     }
 
-    let descriptionLine = "";
-    const nextLine = lines[i + 1]?.trimEnd() ?? "";
-    if (nextLine && !timestampPattern.test(nextLine)) {
-      descriptionLine = stripGraphPrefix(nextLine);
+    const descriptionLines: string[] = [];
+    while (i + 1 < lines.length) {
+      const nextLine = lines[i + 1] ?? "";
+      if (isEntryStartLine(nextLine) || !isGraphContinuationLine(nextLine)) {
+        break;
+      }
+
+      descriptionLines.push(stripGraphPrefix(nextLine.trimEnd()));
       i++;
     }
 
-    const isEmpty = descriptionLine.includes("(empty)");
-    const isConflict = descriptionLine.includes("(conflict)");
-    const cleanedDescription = descriptionLine
+    const summarySource =
+      descriptionLines.find((line) => line.trim().length > 0) ?? "";
+    const isEmpty = summarySource.includes("(empty)");
+    const isConflict = summarySource.includes("(conflict)");
+    const cleanedDescription = summarySource
       .replace(/\(empty\)\s*/g, "")
       .replace(/\(conflict\)\s*/g, "")
       .trim();
+    const cleanedDescriptionLines = descriptionLines.map((line) =>
+      line
+        .replace(/\(empty\)\s*/g, "")
+        .replace(/\(conflict\)\s*/g, ""),
+    );
+    const fullDescription = cleanedDescriptionLines.join("\n").trim();
     const hasDescription =
-      cleanedDescription.length > 0 &&
-      cleanedDescription !== "(no description set)";
-    const description = hasDescription
-      ? cleanedDescription
+      fullDescription.length > 0 && fullDescription !== "(no description set)";
+    const description = hasDescription ? cleanedDescription : "(no description set)";
+    const fullDescriptionText = hasDescription
+      ? fullDescription
       : "(no description set)";
 
     const rootMatch = headerLine.match(rootPattern);
@@ -380,6 +438,7 @@ export function parseJJLog(output: string): ChangeNode[] {
 
       changeNodes.push(
         new ChangeNode(
+          normalizedDescription,
           normalizedDescription,
           `Change: ${changeId}\nCommit: ${commitId}\nRef: ${refName}${
             isEmpty ? "\nStatus: empty" : ""
@@ -443,12 +502,15 @@ export function parseJJLog(output: string): ChangeNode[] {
       refName ? `Ref: ${refName}` : "",
       isEmpty ? "Status: empty" : "",
       isConflict ? "Status: conflict" : "",
-      hasDescription ? `Description: ${description}` : "Description: (no description set)",
+      hasDescription
+        ? `Description: ${fullDescriptionText}`
+        : "Description: (no description set)",
     ].filter(Boolean);
 
     changeNodes.push(
       new ChangeNode(
         description,
+        fullDescriptionText,
         tooltipLines.join("\n"),
         changeId,
         changeId,
